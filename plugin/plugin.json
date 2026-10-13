@@ -1,0 +1,16 @@
+{
+  "$schema": "https://github.com/AvengeMedia/DankMaterialShell/raw/refs/heads/master/PLUGINS/plugin-schema.json",
+  "id": "devAlerts",
+  "name": "Dev Alerts",
+  "description": "Good-first-issue alerts from big tech and tooling orgs, reminders, and tracked GitHub PRs/issues, in an island-style pill",
+  "version": "1.0.0",
+  "author": "Saim Hashmi",
+  "icon": "notifications_active",
+  "type": "widget",
+  "capabilities": ["dankbar-widget"],
+  "component": "./DevAlertsWidget.qml",
+  "settings": "./DevAlertsSettings.qml",
+  "requires_dms": ">=1.6.0",
+  "requires": ["python3", "gh", "notify-send"],
+  "permissions": ["settings_read", "settings_write"]
+}
