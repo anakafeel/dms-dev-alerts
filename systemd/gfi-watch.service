@@ -1,0 +1,6 @@
+[Unit]
+Description=Check GitHub for new good first issues in big repos
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/gfi-watch

@@ -1,0 +1,74 @@
+# gfi-watch watchlist: one GitHub org per line, # starts a comment.
+# Only issues in these orgs are reported (unless gfi-watch --all).
+
+# Infra / automation tooling
+ansible
+ansible-collections
+hashicorp
+opentofu
+pulumi
+splunk
+
+# Target companies
+cisco
+CiscoDevNet
+IBM
+Qiskit
+Shopify
+Ericsson
+redhat-developer
+openshift
+containers        # podman, buildah (Red Hat)
+
+# Cloud native
+kubernetes
+kubernetes-sigs
+prometheus
+grafana
+open-telemetry
+argoproj
+istio
+envoyproxy
+helm
+cilium
+docker
+moby
+
+# Observability / dev platforms
+elastic
+DataDog
+getsentry
+cloudflare
+vercel
+github
+jenkinsci
+
+# Big tech
+microsoft
+Azure
+aws
+awslabs
+GoogleCloudPlatform
+google
+facebook
+Netflix
+uber
+spotify
+stripe
+twilio
+linkedin
+mozilla
+intel
+NVIDIA
+oracle
+salesforce
+SAP
+vmware-tanzu
+canonical
+
+# Languages / runtimes
+apache
+nodejs
+python
+golang
+rust-lang

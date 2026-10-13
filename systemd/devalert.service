@@ -1,0 +1,6 @@
+[Unit]
+Description=Fire due Dev Alerts reminders and poll tracked items
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/devalert tick

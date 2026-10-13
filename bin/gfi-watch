@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""
+gfi-watch - alert on new beginner issues in big GitHub repos.
+
+Searches issues created in the last few hours with beginner labels in
+the orgs listed in ~/.config/gfi-watch/orgs.txt, keeps only repos above
+a star threshold, skips ones already seen, prepends them to a markdown
+feed and sends a desktop notification. With --all (or an empty
+watchlist) it searches every repo instead.
+
+Run by the systemd user timer gfi-watch.timer (hourly).
+Manual:  gfi-watch [--hours 24] [--min-stars N] [--all] [--quiet] [--dry-run]
+"""
+import argparse, json, os, subprocess, sys
+from datetime import datetime, timedelta, timezone
+
+LABELS = '"good first issue","good-first-issue","easy","easyfix","beginner","first-timers-only","help wanted"'
+STATE_DIR = os.path.expanduser("~/.local/state/gfi-watch")
+SEEN = os.path.join(STATE_DIR, "seen.txt")
+WATCHLIST = os.path.expanduser("~/.config/gfi-watch/orgs.txt")
+ORGS_PER_QUERY = 10  # keeps each search query a sane length
+FEED = os.path.expanduser("~/linuxworkspace/gfi-feed.md")
+ISSUES = os.path.join(STATE_DIR, "issues.jsonl")  # read by devalert / the DMS widget
+FEED_HEADER = "# New beginner issues in big repos\n\n| created (UTC) | repo | stars | issue | labels |\n|---|---|---|---|---|\n"
+
+QUERY = """
+query($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on Issue {
+      url title createdAt
+      labels(first: 6) { nodes { name } }
+      repository { nameWithOwner stargazerCount isArchived }
+    } }
+  }
+}
+"""
+
+
+def search(q):
+    after, out = None, []
+    for _ in range(10):  # GitHub search caps at 1000 results
+        cmd = ["gh", "api", "graphql", "-f", f"query={QUERY}", "-f", f"q={q}"]
+        if after:
+            cmd += ["-f", f"after={after}"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"gh api failed: {r.stderr.strip()}")
+        s = json.loads(r.stdout)["data"]["search"]
+        out += [n for n in s["nodes"] if n]
+        if not s["pageInfo"]["hasNextPage"]:
+            break
+        after = s["pageInfo"]["endCursor"]
+    return out
+
+
+def load_orgs():
+    if not os.path.exists(WATCHLIST):
+        return []
+    orgs = []
+    for line in open(WATCHLIST):
+        line = line.split("#", 1)[0].strip()
+        if line:
+            orgs.append(line)
+    return orgs
+
+
+def notify(hits):
+    if not hits:
+        return
+    lines = [f"★{h['repository']['stargazerCount']//1000}k {h['repository']['nameWithOwner']}: {h['title'][:60]}"
+             for h in hits[:5]]
+    if len(hits) > 5:
+        lines.append(f"+{len(hits) - 5} more in gfi-feed.md")
+    subprocess.run(["notify-send", "-a", "gfi-watch", "-u", "normal",
+                    f"{len(hits)} new good first issue(s)", "\n".join(lines)])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--hours", type=int, default=24, help="look-back window (overlap is deduped)")
+    ap.add_argument("--min-stars", type=int, help="default 500 with watchlist, 5000 with --all")
+    ap.add_argument("--all", action="store_true", help="ignore the watchlist, search every repo")
+    ap.add_argument("--quiet", action="store_true", help="no desktop notification")
+    ap.add_argument("--dry-run", action="store_true", help="print hits, write nothing")
+    args = ap.parse_args()
+
+    orgs = [] if args.all else load_orgs()
+    if args.min_stars is None:
+        args.min_stars = 500 if orgs else 5000
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=args.hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    q = f"is:issue is:open no:assignee label:{LABELS} created:>={since}"
+    if orgs:
+        found = []
+        for i in range(0, len(orgs), ORGS_PER_QUERY):
+            found += search(q + "".join(f" org:{o}" for o in orgs[i:i + ORGS_PER_QUERY]))
+    else:
+        found = search(q)
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    seen = set(open(SEEN).read().split()) if os.path.exists(SEEN) else set()
+
+    hits = [n for n in found
+            if n["repository"]["stargazerCount"] >= args.min_stars
+            and not n["repository"]["isArchived"]
+            and n["url"] not in seen]
+    hits.sort(key=lambda n: n["repository"]["stargazerCount"], reverse=True)
+    print(f"{len(found)} searched, {len(hits)} new in repos >= {args.min_stars} stars", file=sys.stderr)
+    if not hits:
+        return
+
+    rows = []
+    for n in hits:
+        labels = ", ".join(l["name"] for l in n["labels"]["nodes"])[:60]
+        title = n["title"].replace("|", "/")[:90]
+        rows.append(f"| {n['createdAt'][:16].replace('T', ' ')} | {n['repository']['nameWithOwner']} | "
+                    f"★{n['repository']['stargazerCount']} | [{title}]({n['url']}) | {labels} |")
+    if args.dry_run:
+        print("\n".join(rows))
+        return
+
+    old = open(FEED).read() if os.path.exists(FEED) else FEED_HEADER
+    body = old[len(FEED_HEADER):] if old.startswith(FEED_HEADER) else old
+    with open(FEED, "w") as f:
+        f.write(FEED_HEADER + "\n".join(rows) + "\n" + body)
+    with open(SEEN, "a") as f:
+        f.write("\n".join(n["url"] for n in hits) + "\n")
+    with open(ISSUES, "a") as f:
+        for n in hits:
+            f.write(json.dumps({"url": n["url"], "title": n["title"], "repo": n["repository"]["nameWithOwner"],
+                                "stars": n["repository"]["stargazerCount"],
+                                "labels": [l["name"] for l in n["labels"]["nodes"]],
+                                "created": n["createdAt"][:16].replace("T", " ")}) + "\n")
+
+    if not args.quiet:
+        notify(hits)
+
+
+if __name__ == "__main__":
+    main()

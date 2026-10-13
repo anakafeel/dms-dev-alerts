@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""
+devalert - backend for the DMS "Dev Alerts" bar widget.
+
+Keeps one JSON state file with custom reminders, tracked GitHub
+issues/PRs and the status (saved/dismissed) of gfi-watch hits.
+The widget reads `devalert status` and calls the other subcommands;
+the systemd user timer devalert.timer runs `devalert tick` every minute
+to fire due reminders and poll tracked issues/PRs.
+
+  devalert status
+  devalert issue URL new|saved|dismissed
+  devalert remind add TEXT WHEN [--repeat daily|weekly]   (WHEN: anything `date -d` takes)
+  devalert remind done ID
+  devalert track add URL | rm URL | read URL
+  devalert tick [--poll]
+"""
+import argparse, fcntl, json, os, re, subprocess, sys, time, uuid
+
+STATE_DIR = os.path.expanduser("~/.local/state/devalert")
+STATE = os.path.join(STATE_DIR, "state.json")
+ISSUES = os.path.expanduser("~/.local/state/gfi-watch/issues.jsonl")
+POLL_EVERY = 600  # seconds between tracked issue/PR polls
+REPEAT = {"daily": 86400, "weekly": 7 * 86400}
+URL_RE = re.compile(r"https://github\.com/([^/]+)/([^/]+)/(?:issues|pull)/(\d+)")
+
+
+def load():
+    if os.path.exists(STATE):
+        with open(STATE) as f:
+            s = json.load(f)
+    else:
+        s = {}
+    s.setdefault("reminders", [])
+    s.setdefault("tracked", [])
+    s.setdefault("issue_status", {})
+    s.setdefault("last_poll", 0)
+    return s
+
+
+def save(s):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(s, f, indent=1)
+    os.replace(tmp, STATE)
+
+
+def notify(title, body, urgency="normal"):
+    subprocess.run(["notify-send", "-a", "Dev Alerts", "-u", urgency, title, body])
+
+
+def gh(path):
+    r = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip())
+    return json.loads(r.stdout)
+
+
+def read_issues(status):
+    if not os.path.exists(ISSUES):
+        return []
+    out = {}
+    with open(ISSUES) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                i = json.loads(line)
+                out[i["url"]] = i
+    items = []
+    for i in out.values():
+        st = status.get(i["url"], "new")
+        if st != "dismissed":
+            items.append({**i, "status": st})
+    items.sort(key=lambda i: i["created"], reverse=True)
+    return items[:150]
+
+
+def cmd_status(s, a):
+    now = time.time()
+    issues = read_issues(s["issue_status"])
+    reminders = sorted(s["reminders"], key=lambda r: r["due"])
+    out = {
+        "issues": issues,
+        "reminders": reminders,
+        "tracked": s["tracked"],
+        "counts": {
+            "new_issues": sum(1 for i in issues if i["status"] == "new"),
+            "due_reminders": sum(1 for r in reminders if r["due"] <= now),
+            "unread_tracked": sum(1 for t in s["tracked"] if t.get("unread")),
+        },
+    }
+    print(json.dumps(out))
+    return False
+
+
+def cmd_issue(s, a):
+    if a.status == "new":
+        s["issue_status"].pop(a.url, None)
+    else:
+        s["issue_status"][a.url] = a.status
+    return True
+
+
+def parse_when(when):
+    r = subprocess.run(["date", "-d", when, "+%s"], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"can't parse time: {when!r}")
+    return int(r.stdout)
+
+
+def cmd_remind(s, a):
+    if a.action == "add":
+        if not a.text or not a.when:
+            sys.exit("usage: devalert remind add TEXT WHEN [--repeat daily|weekly]")
+        s["reminders"].append({"id": uuid.uuid4().hex[:8], "text": a.text,
+                               "due": parse_when(a.when), "repeat": a.repeat or "", "fired": False})
+    elif a.action == "done":
+        s["reminders"] = [r for r in s["reminders"] if r["id"] != a.text]
+    return True
+
+
+def poll_one(t, me):
+    m = URL_RE.match(t["url"])
+    if not m:
+        return
+    owner, repo, num = m.groups()
+    i = gh(f"repos/{owner}/{repo}/issues/{num}")
+    t["title"] = i["title"]
+    t["repo"] = f"{owner}/{repo}"
+    t["num"] = int(num)
+    t["kind"] = "pr" if "pull_request" in i else "issue"
+    old_state, t["state"] = t.get("state"), i["state"]
+    if t["kind"] == "pr" and i["state"] == "closed":
+        t["state"] = "merged" if gh(f"repos/{owner}/{repo}/pulls/{num}").get("merged") else "closed"
+    news = []
+    since = t.get("checked")
+    if since and i["comments"] > t.get("comments", 0):
+        cs = gh(f"repos/{owner}/{repo}/issues/{num}/comments?since={since}&per_page=50")
+        news = [c["user"]["login"] for c in cs if c["user"]["login"] != me]
+    t["comments"] = i["comments"]
+    t["checked"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    msg = []
+    if news:
+        msg.append(f"{len(news)} new comment(s) from {', '.join(sorted(set(news)))}")
+    if old_state and old_state != t["state"]:
+        msg.append(f"now {t['state']}")
+    if msg:
+        t["unread"] = True
+        t["news"] = "; ".join(msg)
+        notify(f"{t['repo']}#{num}", f"{t['title'][:70]}\n{t['news']}")
+
+
+def me(s):
+    if not s.get("me"):
+        s["me"] = gh("user")["login"]
+    return s["me"]
+
+
+def poll(s):
+    for t in s["tracked"]:
+        try:
+            poll_one(t, me(s))
+        except Exception as e:  # one bad URL must not stop the rest
+            print(f"poll {t['url']}: {e}", file=sys.stderr)
+    s["last_poll"] = time.time()
+
+
+def cmd_track(s, a):
+    url = a.url.split("#")[0].split("?")[0].rstrip("/")
+    if a.action == "add":
+        if not URL_RE.fullmatch(url):
+            sys.exit("not a GitHub issue/PR URL")
+        if not any(t["url"] == url for t in s["tracked"]):
+            t = {"url": url}
+            s["tracked"].append(t)
+            try:
+                poll_one(t, me(s))
+            except Exception as e:
+                print(f"poll {url}: {e}", file=sys.stderr)
+    elif a.action == "rm":
+        s["tracked"] = [t for t in s["tracked"] if t["url"] != url]
+    elif a.action == "read":
+        for t in s["tracked"]:
+            if t["url"] == url:
+                t["unread"] = False
+                t.pop("news", None)
+    return True
+
+
+def cmd_tick(s, a):
+    now = time.time()
+    for r in s["reminders"]:
+        if r["due"] <= now and not r["fired"]:
+            notify("Reminder", r["text"], "critical")
+            if r["repeat"] in REPEAT:
+                while r["due"] <= now:
+                    r["due"] += REPEAT[r["repeat"]]
+            else:
+                r["fired"] = True
+    if a.poll or now - s["last_poll"] >= POLL_EVERY:
+        poll(s)
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status").set_defaults(fn=cmd_status)
+    p = sub.add_parser("issue")
+    p.add_argument("url")
+    p.add_argument("status", choices=["new", "saved", "dismissed"])
+    p.set_defaults(fn=cmd_issue)
+    p = sub.add_parser("remind")
+    p.add_argument("action", choices=["add", "done"])
+    p.add_argument("text", help="reminder text, or ID for done")
+    p.add_argument("when", nargs="?")
+    p.add_argument("--repeat", choices=list(REPEAT))
+    p.set_defaults(fn=cmd_remind)
+    p = sub.add_parser("track")
+    p.add_argument("action", choices=["add", "rm", "read"])
+    p.add_argument("url")
+    p.set_defaults(fn=cmd_track)
+    p = sub.add_parser("tick")
+    p.add_argument("--poll", action="store_true", help="poll tracked issues now")
+    p.set_defaults(fn=cmd_tick)
+    a = ap.parse_args()
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE + ".lock", "w") as lock:  # widget and timer both write state
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        s = load()
+        if a.fn(s, a):
+            save(s)
+
+
+if __name__ == "__main__":
+    main()
