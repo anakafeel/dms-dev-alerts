@@ -111,18 +111,16 @@ PluginComponent {
     pillRightClickAction: () => root.run(["tick", "--poll"], I18n.tr("Checked tracked issues"))
 
     horizontalBarPill: Component {
-        StyledRect {
+        // BasePill draws the background and padding and sizes itself from
+        // implicitWidth, so this pill matches the other bar widgets.
+        Item {
             id: pill
-            readonly property real compactWidth: compactRow.implicitWidth + Theme.spacingM * 2
-            readonly property real peekWidth: Math.min(380, peekRow.implicitWidth + Theme.spacingM * 2)
-            width: root.peeking ? peekWidth : compactWidth
-            height: root.widgetThickness
-            radius: height / 2
-            color: root.peeking ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
+            implicitWidth: root.peeking ? Math.min(356, peekRow.implicitWidth) : compactRow.implicitWidth
+            implicitHeight: root.widgetThickness
             clip: true
 
             // Spring-like overshoot, the "island" grow/shrink.
-            Behavior on width {
+            Behavior on implicitWidth {
                 NumberAnimation {
                     duration: 420
                     easing.type: Easing.OutBack
@@ -159,7 +157,6 @@ PluginComponent {
                 id: peekRow
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.left: parent.left
-                anchors.leftMargin: Theme.spacingM
                 spacing: Theme.spacingS
                 opacity: root.peeking ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 220 } }
