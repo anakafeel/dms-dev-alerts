@@ -19,6 +19,7 @@ STATE_DIR = os.path.expanduser("~/.local/state/gfi-watch")
 SEEN = os.path.join(STATE_DIR, "seen.txt")
 WATCHLIST = os.path.expanduser("~/.config/gfi-watch/orgs.txt")
 ORGS_PER_QUERY = 10  # keeps each search query a sane length
+NO_MIN_STARS = {"shopify"}  # orgs reported regardless of --min-stars (lowercase)
 FEED = os.path.expanduser("~/linuxworkspace/gfi-feed.md")
 ISSUES = os.path.join(STATE_DIR, "issues.jsonl")  # read by devalert / the DMS widget
 FEED_HEADER = "# New beginner issues in big repos\n\n| created (UTC) | repo | stars | issue | labels |\n|---|---|---|---|---|\n"
@@ -102,7 +103,8 @@ def main():
     seen = set(open(SEEN).read().split()) if os.path.exists(SEEN) else set()
 
     hits = [n for n in found
-            if n["repository"]["stargazerCount"] >= args.min_stars
+            if (n["repository"]["stargazerCount"] >= args.min_stars
+                or n["repository"]["nameWithOwner"].split("/")[0].lower() in NO_MIN_STARS)
             and not n["repository"]["isArchived"]
             and n["url"] not in seen]
     hits.sort(key=lambda n: n["repository"]["stargazerCount"], reverse=True)
